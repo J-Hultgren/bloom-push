@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "description": "Bloom finance app push notification backend",
   "dependencies": {
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "@upstash/redis": "^1.28.0"
   },
   "engines": {
-  "node": "24.x"  
+    "node": "18.x"
   }
 }
