@@ -1,0 +1,11 @@
+{
+  "name": "bloom-push",
+  "version": "1.0.0",
+  "description": "Bloom finance app push notification backend",
+  "dependencies": {
+    "web-push": "^3.6.7"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
