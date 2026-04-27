@@ -11,30 +11,47 @@ async function getRedis() {
   return Redis.fromEnv();
 }
 
-function parseLendingClub(subject, body) {
-  if (!subject.toLowerCase().includes('lendingclub') && !subject.toLowerCase().includes('transaction alert')) return null;
+function parseLendingClub(subject, body, from) {
+  const isLC = subject.toLowerCase().includes('lendingclub') ||
+               (from||'').toLowerCase().includes('lendingclub');
+  if (!isLC) return null;
   const amountMatch = body.match(/Amount:\s*\$?([\d,]+\.?\d*)/i) || body.match(/\$([\d,]+\.\d{2})/);
   const txnMatch = body.match(/Transaction:\s*([^\n<\r]+)/i);
   if (!amountMatch) return null;
-  const merchant = (txnMatch ? txnMatch[1] : 'LendingClub').replace(/\s*(DBT|POS|ACH|CHK)\s*PURCHASE.*/i,'').replace(/TST\*/i,'').trim();
+  const merchant = (txnMatch ? txnMatch[1] : 'LendingClub')
+    .replace(/\s*(DBT|POS|ACH|CHK)\s*PURCHASE.*/i,'').replace(/TST\*/i,'').trim();
   const amount = parseFloat(amountMatch[1].replace(',',''));
   const isDeposit = /deposit/i.test(body) && !/debit|purchase|withdrawal/i.test(body);
   return { bank:'LendingClub', account:'lc', merchant: merchant||'LendingClub', amount: isDeposit?amount:-amount, amountDisplay:`$${amount.toFixed(2)}` };
 }
 
-function parseServiceCU(subject, body) {
-  if (!subject.toLowerCase().includes('service credit union') && !subject.toLowerCase().includes('service cu')) return null;
-  const lineMatch = body.match(/([A-Za-z][^\n$]{5,50})\s+\$([\d,]+\.?\d*)/m);
-  const amountMatch = body.match(/\$([\d,]+\.?\d*)/);
-  if (!amountMatch && !lineMatch) return null;
-  const amount = parseFloat((lineMatch?lineMatch[2]:amountMatch[1]).replace(',',''));
-  const merchant = lineMatch ? lineMatch[1].trim() : 'Service CU Transaction';
+function parseServiceCU(subject, body, from) {
+  const isSCU = subject.toLowerCase().includes('service credit union') ||
+                subject.toLowerCase().includes('service cu') ||
+                (from||'').toLowerCase().includes('servicecu.org') ||
+                body.toLowerCase().includes('service credit union');
+  if (!isSCU) return null;
+
+  // Clean HTML tags from body
+  const clean = body.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+
+  // Match transaction line: "Deposit Transfer from Jessa SAVINGS $1.00"
+  // or "Purchase at MERCHANT $22.61"
+  const txnMatch = clean.match(/([A-Z][A-Za-z\s]+(?:Transfer|Purchase|Withdrawal|Payment|Deposit)[A-Za-z\s]*)\s+\$([\d,]+\.?\d*)/i) ||
+                   clean.match(/((?:Deposit|Withdrawal|Purchase|Payment|Transfer)[A-Za-z\s,*]+)\s+\$([\d,]+\.?\d*)/i);
+
+  const amountMatch = clean.match(/\$([\d,]+\.?\d*)/);
+  if (!amountMatch && !txnMatch) return null;
+
+  const amount = parseFloat((txnMatch ? txnMatch[2] : amountMatch[1]).replace(',',''));
+  const merchant = txnMatch ? txnMatch[1].trim() : 'Service CU Transaction';
   const isDeposit = /deposit|transfer from|credit/i.test(merchant);
-  return { bank:'Service CU', account:'scu', merchant, amount: isDeposit?amount:-amount, amountDisplay:`$${amount.toFixed(2)}` };
+
+  return { bank:'Service CU', account:'scu', merchant: merchant.slice(0,60), amount: isDeposit?amount:-amount, amountDisplay:`$${amount.toFixed(2)}` };
 }
 
-function parseEmail(subject, body) {
-  return parseLendingClub(subject, body) || parseServiceCU(subject, body);
+function parseEmail(subject, body, from) {
+  return parseLendingClub(subject, body, from) || parseServiceCU(subject, body, from);
 }
 
 function suggestCategory(merchant) {
@@ -85,15 +102,17 @@ export default async function handler(req, res) {
   if (req.method === 'POST') {
     const { subject, body, from } = req.body || {};
     if (!subject && !body) return res.status(400).json({ error: 'Missing subject or body' });
-    const cleanBody = (body||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
-    const txn = parseEmail(subject||'', cleanBody);
-    if (!txn) return res.status(200).json({ ok:false, message:'Not a bank email', subject, preview:cleanBody.slice(0,200) });
+
+    const txn = parseEmail(subject||'', body||'', from||'');
+    if (!txn) return res.status(200).json({ ok:false, message:'Not a recognized bank email', subject });
 
     const pushPayload = {
       title: `${txn.amount>0?'💰':'💳'} ${txn.amount>0?'+':'-'}${txn.amountDisplay} — ${txn.bank}`,
       body: `${txn.merchant} · Tap to log in Bloom`,
-      amount: String(txn.amount), merchant: txn.merchant,
-      account: txn.account, catId: suggestCategory(txn.merchant),
+      amount: String(txn.amount),
+      merchant: txn.merchant,
+      account: txn.account,
+      catId: suggestCategory(txn.merchant),
     };
 
     let subscription;
@@ -105,7 +124,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Storage error: ' + e.message });
     }
 
-    if (!subscription) return res.status(400).json({ error: 'No push subscription registered. Open Bloom and enable notifications first.' });
+    if (!subscription) return res.status(400).json({ error: 'No push subscription registered.' });
 
     try {
       await webpush.sendNotification(subscription, JSON.stringify(pushPayload));
